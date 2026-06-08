@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400" role="img" aria-label="AidPulse SG">
+  <defs>
+    <linearGradient id="redGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff3b3b"/>
+      <stop offset="100%" stop-color="#ff1010"/>
+    </linearGradient>
+    <linearGradient id="blueGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#22a7ff"/>
+      <stop offset="100%" stop-color="#006fff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- dark rounded tile so the white cross/loop stay visible on any tab theme -->
+  <rect width="400" height="400" rx="88" fill="#0a0b0e"/>
+
+  <!-- mark: centered + scaled from the brand lockup -->
+  <g transform="translate(200,200) scale(0.8) translate(-191.5,-183.5)">
+    <path d="M 145 230
+             C 102 188, 74 162, 54 136
+             C 24 96, 26 50, 58 24
+             C 92 -3, 142 6, 171 42"
+          fill="none" stroke="url(#redGrad)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 226 230
+             C 270 188, 299 162, 320 136
+             C 351 96, 350 50, 317 24
+             C 282 -3, 232 6, 201 42"
+          fill="none" stroke="url(#blueGrad)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="159" y="88" width="52" height="112" rx="8" fill="#ffffff"/>
+    <rect x="129" y="118" width="112" height="52" rx="8" fill="#ffffff"/>
+    <path d="M 58 248
+             C 34 269, 23 301, 34 329
+             C 44 355, 68 370, 103 370
+             C 139 370, 171 356, 186 337
+             C 193 327, 201 327, 208 337
+             C 223 356, 255 370, 291 370
+             C 326 370, 350 355, 360 329
+             C 371 301, 360 269, 336 248"
+          fill="none" stroke="#f2f2f2" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
