@@ -1,26 +1,185 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "leaflet/dist/leaflet.css";
 
+@custom-variant dark (&:is(.dark *));
+
+/*
+  AidPulse SG — dark-only emergency-response theme.
+  Semantic accents drive the whole UI:
+    danger/critical = red, info = blue, success = green, warning/officer = amber.
+*/
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --radius: 0.9rem;
+
+  --background: #0a0b0e;
+  --foreground: #f3f4f7;
+
+  --card: #141519;
+  --card-foreground: #f3f4f7;
+  --popover: #16171c;
+  --popover-foreground: #f3f4f7;
+
+  --primary: #ef4444;
+  --primary-foreground: #ffffff;
+
+  --secondary: #1e1f26;
+  --secondary-foreground: #f3f4f7;
+
+  --muted: #1a1b21;
+  --muted-foreground: #9a9ca6;
+
+  --accent: #1e1f26;
+  --accent-foreground: #f3f4f7;
+
+  --destructive: #ef4444;
+
+  --border: #26272f;
+  --input: #2a2b34;
+  --ring: #ef4444;
+
+  /* AidPulse semantic accents */
+  --danger: #ef4444;
+  --danger-foreground: #ffffff;
+  --info: #3b82f6;
+  --info-foreground: #ffffff;
+  --success: #22c55e;
+  --success-foreground: #04210f;
+  --warning: #f59e0b;
+  --warning-foreground: #2a1a02;
+  --gold: #f5b324;
+
+  --chart-1: #ef4444;
+  --chart-2: #3b82f6;
+  --chart-3: #22c55e;
+  --chart-4: #f59e0b;
+  --chart-5: #a855f7;
+
+  --sidebar: #101116;
+  --sidebar-foreground: #f3f4f7;
+  --sidebar-primary: #ef4444;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #1e1f26;
+  --sidebar-accent-foreground: #f3f4f7;
+  --sidebar-border: #26272f;
+  --sidebar-ring: #ef4444;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-danger: var(--danger);
+  --color-danger-foreground: var(--danger-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-gold: var(--gold);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) * 1.6);
+  --radius-3xl: calc(var(--radius) * 2.2);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer components {
+  /* Lifted card surface used across dashboards */
+  .surface {
+    @apply rounded-2xl border border-border bg-card;
+  }
+  .surface-muted {
+    @apply rounded-2xl border border-border bg-secondary/40;
+  }
+  /* Small status pills (LIVE, severity, role) */
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium;
+  }
+  /* Top-nav tab */
+  .nav-tab {
+    @apply inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground;
+  }
+  .nav-tab-active {
+    @apply bg-primary/15 text-primary;
+  }
+  /* Subtle radial glow used behind hero/alerts */
+  .glow-danger {
+    background:
+      radial-gradient(60% 120% at 50% 0%, color-mix(in oklab, var(--danger) 18%, transparent), transparent 70%);
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+/* Leaflet renders its own panes; keep them dark and rounded inside our cards */
+.leaflet-container {
+  background: #0a0b0e;
+  font-family: var(--font-sans);
+}
+.leaflet-control-attribution {
+  background: rgba(10, 11, 14, 0.7) !important;
+  color: #6b6d77 !important;
+}
+.leaflet-control-attribution a {
+  color: #9a9ca6 !important;
 }
