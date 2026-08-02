@@ -1,8 +1,34 @@
 # AidPulse SG
 
+[![CI](https://github.com/Leon-a11y-alt/AIdPulse_SG/actions/workflows/ci.yml/badge.svg)](https://github.com/Leon-a11y-alt/AIdPulse_SG/actions/workflows/ci.yml)
+
 **Live demo:** https://aidpulsesg.vercel.app
 
 One app for real-time health & emergency response in Singapore — live case tracking, hospital bed availability, an AI health assistant, and volunteer & officer coordination.
+
+---
+
+## Quality pipeline
+
+Every push and pull request runs the full pipeline in GitHub Actions — hygiene and
+secret scanning, ESLint, strict `tsc`, 76 unit tests on Node 22 and 24 behind a
+coverage gate, an `npm audit` gate, and a production build that is booted and
+smoke-tested over HTTP. The pipeline verifies; it does not deploy — it publishes
+the passing build as an artifact, a single `ci-result` check to gate on, and a
+`/api/health` probe for whatever deploys it.
+
+Run the same gates locally:
+
+```bash
+npm run ci        # lint → typecheck → tests + coverage → build
+npm test          # just the unit tests
+npm run test:watch
+```
+
+Requires Node 22.18+ or 24+ (the test suite runs TypeScript directly via Node's
+native type stripping — no test framework, no transpile step).
+
+Full write-up: [docs/05-ci-pipeline.md](docs/05-ci-pipeline.md).
 
 ---
 
