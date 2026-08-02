@@ -1,0 +1,31 @@
+# Keeps the two things CI depends on from silently rotting:
+#   • npm dependencies (a stale Next/Supabase client eventually fails to build)
+#   • the GitHub Actions the pipeline itself pins
+#
+# Updates arrive as pull requests, which means every one of them has to pass the
+# full CI pipeline before it can be merged — the pipeline maintains itself.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Singapore
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # One PR for the routine patch/minor bumps; majors stay separate so they
+      # get a proper review.
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(ci)"

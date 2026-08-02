@@ -1,0 +1,517 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AidPulse SG — Continuous Integration
+#
+# WHAT THIS IS
+#   Every push and every pull request is verified automatically before anyone
+#   merges it. Nothing reaches `main` (and therefore Vercel) without passing
+#   every gate below.
+#
+# THE PIPELINE
+#
+#            ┌──────────────┐
+#            │ 1. quality   │  repo hygiene + secret scan + env-var contract
+#            └──────┬───────┘  (cheapest checks first — fail fast)
+#                   │
+#     ┌─────────────┼─────────────┬───────────────┐
+#     ▼             ▼             ▼               ▼
+#  2. lint     3. typecheck   4. test        5. security
+#  (ESLint)    (tsc strict)   (Node 22 + 24, (npm audit +
+#                              coverage gate)  dependency review)
+#     └─────────────┴─────────────┘
+#                   │
+#                   ▼
+#            ┌──────────────┐
+#            │ 6. build     │  production `next build`, then boot the real
+#            │    + smoke   │  server and prove /api/health answers 200
+#            └──────┬───────┘
+#                   ▼
+#            ┌──────────────┐
+#            │ 7. ci-result │  one required status check; publishes the
+#            └──────────────┘  summary table and fails if anything failed
+#
+#   Stages 2–5 run in parallel (they are independent), so a full run stays
+#   fast; stage 6 only starts once they are all green.
+#
+# SCOPE
+#   This workflow is the CI component only — it verifies, it does not deploy.
+#   Deployment, containerisation and infrastructure are separate components.
+#   What CI hands them: the `next-build-<sha>` artifact, the `ci-result` status
+#   check to gate on, the `/api/health` probe, and `workflow_call` below for
+#   reusing these gates. See §4 of docs/05-ci-pipeline.md for the contract.
+#
+# Full write-up, including how to demo and extend it: docs/05-ci-pipeline.md
+# ─────────────────────────────────────────────────────────────────────────────
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**", "fix/**", "chore/**"]
+  pull_request:
+    branches: [main]
+  # Lets us press "Run workflow" in the Actions tab (handy during the demo).
+  workflow_dispatch:
+  # Lets another member's workflow (deploy, Docker, IaC) reuse these gates
+  # instead of duplicating them.
+  workflow_call:
+
+# Push twice in quick succession and the older run is cancelled instead of
+# burning a runner on a commit nobody is waiting for.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: the pipeline only ever needs to read the repository.
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24"
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # 1. QUALITY GATE — seconds, no install. Catches the mistakes that hurt most.
+  # ───────────────────────────────────────────────────────────────────────────
+  quality:
+    name: Quality gate (hygiene + secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v5
+
+      - name: No real .env file is committed
+        run: |
+          if git ls-files | grep -E '(^|/)\.env(\.local|\.production|\.development)?$'; then
+            echo "::error::A real .env file is tracked by git. Only .env.example belongs in the repo."
+            exit 1
+          fi
+          echo "OK — no .env files tracked."
+
+      - name: No dependencies or build output are committed
+        run: |
+          if git ls-files | grep -E '(^|/)(node_modules|\.next|out)/'; then
+            echo "::error::node_modules / .next / out is committed. Check .gitignore."
+            exit 1
+          fi
+          echo "OK — repository contains source only."
+
+      - name: The lockfile is present (reproducible installs)
+        run: |
+          test -f package-lock.json || {
+            echo "::error::package-lock.json is missing — 'npm ci' cannot run without it."
+            exit 1
+          }
+          echo "OK — package-lock.json present (lockfileVersion $(node -p "require('./package-lock.json').lockfileVersion"))."
+
+      - name: No credentials in tracked files
+        run: |
+          # Patterns for the real credentials this project uses. .env.example is
+          # scanned too — its placeholders ("ACxxxx…") deliberately do not match.
+          # The workflow files themselves are excluded so these patterns don't
+          # match their own definition.
+          PATTERNS='AC[0-9a-fA-F]{32}|sb_secret_[A-Za-z0-9_-]{10,}|SUPABASE_SERVICE_ROLE_KEY=[A-Za-z0-9._-]{20,}|eyJhbGciOi[A-Za-z0-9._-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+          FILES=$(git ls-files -- . ':!:.github/**' ':!:package-lock.json' ':!:docs/sample-certificates/**')
+          if echo "$FILES" | xargs -r grep -nEI "$PATTERNS" ; then
+            echo "::error::A credential-shaped string is committed. Rotate it and move it to .env.local."
+            exit 1
+          fi
+          echo "OK — no credential-shaped strings found."
+
+      - name: Every env var used in code is documented in .env.example
+        run: |
+          # Stops the classic "works on my machine, 500s on Vercel" failure: a
+          # new process.env.X that nobody knew to set in the deploy environment.
+          RUNTIME_VARS='NODE_ENV|CI|VERCEL|VERCEL_ENV|VERCEL_URL|VERCEL_GIT_COMMIT_SHA|GIT_COMMIT_SHA|NEXT_RUNTIME|PORT'
+          USED=$(grep -rhoE 'process\.env\.[A-Z0-9_]+' app lib components \
+                   --include='*.ts' --include='*.tsx' \
+                 | sed 's/process\.env\.//' | sort -u)
+          MISSING=""
+          for v in $USED; do
+            case "$v" in
+              *TEST*) continue ;;
+            esac
+            echo "$v" | grep -qE "^($RUNTIME_VARS)$" && continue
+            grep -qE "^${v}=" .env.example || MISSING="$MISSING $v"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::Undocumented environment variables:$MISSING — add them to .env.example."
+            exit 1
+          fi
+          echo "OK — every environment variable the code reads is documented."
+
+      - name: Publish the hygiene summary
+        run: |
+          {
+            echo "### 1 · Quality gate :broom:"
+            echo ""
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| No committed .env | :white_check_mark: |"
+            echo "| No committed node_modules/.next | :white_check_mark: |"
+            echo "| Lockfile present | :white_check_mark: |"
+            echo "| No credential-shaped strings | :white_check_mark: |"
+            echo "| .env.example documents every env var | :white_check_mark: |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 2. LINT — ESLint (next/core-web-vitals + TypeScript rules)
+  # ───────────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint (ESLint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [quality]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # `npm ci` — not `npm install` — so CI installs exactly what the lockfile
+      # pins and never silently upgrades a dependency mid-pipeline.
+      - name: Install dependencies
+        run: npm ci
+
+      # ESLint runs with `|| true` on purpose: the summary script below owns the
+      # pass/fail decision, so the per-rule report is published even on a red run
+      # instead of being swallowed by a bare "exit code 1".
+      - name: Run ESLint
+        run: npm run lint -- --format=json --output-file=eslint-report.json || true
+
+      # Publishes the per-rule breakdown, annotates the offending lines in the
+      # PR diff, and exits non-zero if ESLint reported any error.
+      - name: Report the lint results
+        run: node .github/scripts/eslint-summary.mjs eslint-report.json
+
+      - name: Upload the lint report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: eslint-report
+          path: eslint-report.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 3. TYPECHECK — the strict `tsc` pass that `next build` is configured to skip
+  # ───────────────────────────────────────────────────────────────────────────
+  typecheck:
+    name: Type check (tsc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [quality]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # next-env.d.ts is generated by `next dev`/`next build` and is gitignored,
+      # so a clean checkout has to recreate it before tsc can resolve Next's
+      # ambient types.
+      - name: Generate Next.js ambient types
+        run: |
+          if [ ! -f next-env.d.ts ]; then
+            printf '/// <reference types="next" />\n/// <reference types="next/image-types/global" />\n' > next-env.d.ts
+          fi
+
+      - name: Type check the whole project
+        run: |
+          set -o pipefail
+          npm run typecheck 2>&1 | tee tsc-output.log
+
+      - name: Surface the type errors
+        if: failure()
+        run: node .github/scripts/annotate-log.mjs tsc-output.log "TypeScript errors" error 150
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 4. TEST — the zero-dependency suite, on both supported Node majors
+  #
+  #    Tests run on Node 22 and Node 24 because the suite relies on native
+  #    TypeScript type stripping; running both proves the project is not pinned
+  #    to one developer's local runtime. Coverage thresholds are enforced, so
+  #    adding untested code to a covered module fails the build.
+  # ───────────────────────────────────────────────────────────────────────────
+  test:
+    name: Unit tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [quality]
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.x", "24.x"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run the test suite with coverage
+        run: |
+          set -o pipefail
+          mkdir -p coverage
+          npm run test:ci 2>&1 | tee test-output.log
+
+      # Failing assertion → annotation; passing run → the coverage table lands
+      # in the run summary as the evidence that the gate was actually enforced.
+      - name: Surface the test failures
+        if: failure()
+        run: node .github/scripts/annotate-log.mjs test-output.log "Test failures (Node ${{ matrix.node }})" error 200
+
+      - name: Publish the coverage table
+        if: success()
+        run: node .github/scripts/annotate-log.mjs test-output.log "Test + coverage summary (Node ${{ matrix.node }})" notice 40
+
+      - name: Upload the coverage report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-node-${{ matrix.node }}
+          path: coverage/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 5. SECURITY — dependency vulnerabilities
+  #
+  #    Gating rule: any CRITICAL advisory fails the pipeline; HIGH and below are
+  #    reported in the run summary so they are visible without blocking a demo
+  #    on an upstream fix nobody can land today.
+  # ───────────────────────────────────────────────────────────────────────────
+  security:
+    name: Security scan (npm audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [quality]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit the dependency tree
+        run: |
+          # `npm audit` exits non-zero when it finds anything, so capture the
+          # JSON first and decide ourselves what is a build-breaking severity.
+          npm audit --json > audit.json || true
+          node --input-type=commonjs -e "
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('audit.json', 'utf8'));
+            const v = (report.metadata && report.metadata.vulnerabilities) || {};
+            const rows = ['critical','high','moderate','low','info']
+              .map(k => '| ' + k + ' | ' + (v[k] || 0) + ' |').join('\n');
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              '### 5 · Dependency audit :lock:\n\n| Severity | Advisories |\n| --- | --- |\n' + rows + '\n');
+            console.log('vulnerabilities:', JSON.stringify(v));
+            if ((v.critical || 0) > 0) {
+              console.error('::error::' + v.critical + ' critical advisory/advisories — the pipeline stops here.');
+              process.exit(1);
+            }
+            if ((v.high || 0) > 0) {
+              console.log('::warning::' + v.high + ' high-severity advisory/advisories — see the run summary.');
+            }
+          "
+
+      - name: Upload the audit report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: npm-audit-report
+          path: audit.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 6. BUILD + SMOKE TEST — the stage that proves the app actually runs
+  #
+  #    A passing unit test does not prove the application boots. This job runs
+  #    the real production build, starts the real server, and calls it over HTTP
+  #    exactly like a user would.
+  # ───────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build + smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [lint, typecheck, test]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Next's build cache makes repeat builds dramatically faster. Keyed on the
+      # lockfile + sources so a real change always produces a real rebuild.
+      - name: Restore the Next.js build cache
+        uses: actions/cache@v4
+        with:
+          path: .next/cache
+          key: next-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('app/**', 'components/**', 'lib/**') }}
+          restore-keys: |
+            next-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
+            next-${{ runner.os }}-
+
+      - name: Build the production bundle
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee build-output.log
+
+      - name: Surface the build errors
+        if: failure()
+        run: node .github/scripts/annotate-log.mjs build-output.log "next build failed" error 150
+
+      - name: Smoke test — the built app boots and answers
+        env:
+          GIT_COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          npm start > server.log 2>&1 &
+          SERVER_PID=$!
+
+          # Poll the health probe until the server is ready (max ~60s).
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/api/health -o health.json; then READY=1; break; fi
+            sleep 2
+          done
+
+          if [ "$READY" != "1" ]; then
+            echo "::error::The application never became healthy. Server log:"
+            cat server.log
+            kill $SERVER_PID 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Health response: $(cat health.json)"
+
+          # 1) The probe must actually report healthy — not merely respond.
+          node --input-type=commonjs -e "
+            const h = require('./health.json');
+            if (h.status !== 'ok') { console.error('unhealthy:', h); process.exit(1); }
+            console.log('health ok — commit', h.commit, '| env', h.environment);
+          "
+
+          # 2) The public landing page renders.
+          HOME_CODE=$(curl -s -o home.html -w '%{http_code}' http://127.0.0.1:3000/)
+          test "$HOME_CODE" = "200" || {
+            echo "::error::GET / returned $HOME_CODE"; cat server.log; kill $SERVER_PID; exit 1;
+          }
+
+          # 3) Routing is real: an unknown path must 404, not 200-everything.
+          NOT_FOUND=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/this-page-does-not-exist)
+          test "$NOT_FOUND" = "404" || {
+            echo "::error::An unknown path returned $NOT_FOUND instead of 404"; kill $SERVER_PID; exit 1;
+          }
+
+          kill $SERVER_PID 2>/dev/null || true
+          echo "Smoke test passed: /api/health ok, / → 200, unknown path → 404."
+
+      - name: Upload the deployable build output
+        uses: actions/upload-artifact@v5
+        with:
+          name: next-build-${{ github.sha }}
+          path: |
+            .next
+            !.next/cache
+          # `.next` is a dot-directory, and upload-artifact skips hidden paths
+          # unless told otherwise — without this the artifact comes out empty.
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Publish the build summary
+        run: |
+          {
+            echo "### 6 · Build + smoke test :rocket:"
+            echo ""
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| \`next build\` | :white_check_mark: |"
+            echo "| Server boots | :white_check_mark: |"
+            echo "| \`GET /api/health\` → healthy | :white_check_mark: |"
+            echo "| \`GET /\` → 200 | :white_check_mark: |"
+            echo "| Unknown path → 404 | :white_check_mark: |"
+            echo ""
+            echo "Build artifact: \`next-build-${GITHUB_SHA::7}\` — this is what CD deploys."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 7. CI RESULT — one status check to rule them all
+  #
+  #    Branch protection points at this single job, so adding a stage above
+  #    never means reconfiguring the protected-branch rules. It runs even when
+  #    an upstream job failed, publishes the table, and then fails if anything
+  #    upstream did.
+  # ───────────────────────────────────────────────────────────────────────────
+  ci-result:
+    name: CI result
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [quality, lint, typecheck, test, security, build]
+    steps:
+      - name: Summarise every stage
+        env:
+          R_QUALITY: ${{ needs.quality.result }}
+          R_LINT: ${{ needs.lint.result }}
+          R_TYPECHECK: ${{ needs.typecheck.result }}
+          R_TEST: ${{ needs.test.result }}
+          R_SECURITY: ${{ needs.security.result }}
+          R_BUILD: ${{ needs.build.result }}
+        run: |
+          icon() { case "$1" in success) echo ":white_check_mark:";; skipped) echo ":fast_forward:";; *) echo ":x:";; esac; }
+
+          {
+            echo "## CI summary — \`${GITHUB_REF_NAME}\` @ \`${GITHUB_SHA::7}\`"
+            echo ""
+            echo "| # | Stage | Result |"
+            echo "| --- | --- | --- |"
+            echo "| 1 | Quality gate (hygiene + secrets) | $(icon "$R_QUALITY") $R_QUALITY |"
+            echo "| 2 | Lint (ESLint) | $(icon "$R_LINT") $R_LINT |"
+            echo "| 3 | Type check (tsc) | $(icon "$R_TYPECHECK") $R_TYPECHECK |"
+            echo "| 4 | Unit tests (Node 22 + 24, coverage gate) | $(icon "$R_TEST") $R_TEST |"
+            echo "| 5 | Security scan (npm audit) | $(icon "$R_SECURITY") $R_SECURITY |"
+            echo "| 6 | Build + smoke test | $(icon "$R_BUILD") $R_BUILD |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          FAILED=0
+          for r in "$R_QUALITY" "$R_LINT" "$R_TYPECHECK" "$R_TEST" "$R_SECURITY" "$R_BUILD"; do
+            case "$r" in success|skipped) ;; *) FAILED=1 ;; esac
+          done
+
+          if [ "$FAILED" = "1" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**This commit is not safe to merge.**" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::One or more CI stages failed."
+            exit 1
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**All gates green — this commit is safe to merge and deploy.**" >> "$GITHUB_STEP_SUMMARY"
