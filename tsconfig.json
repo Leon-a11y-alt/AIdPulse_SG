@@ -7,6 +7,10 @@
     "strict": true,
     "noEmit": true,
     "esModuleInterop": true,
+    // The zero-dependency test suite runs straight off TypeScript sources with
+    // Node's native type stripping, so test files import "./module.ts" by its
+    // real extension. Safe here because the compiler only type-checks (noEmit).
+    "allowImportingTsExtensions": true,
     "module": "esnext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
